@@ -7,8 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/99designs/keyring"
+	"golang.org/x/term"
 )
 
 const (
@@ -326,12 +330,32 @@ func getUsageLimits() UsageLimits {
 }
 
 func getKeychainCredentials() string {
-	cmd := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+	// Try cross-platform keyring first
+	ring, err := keyring.Open(keyring.Config{
+		ServiceName: "Claude Code-credentials",
+		// Linux: use SecretService (GNOME Keyring / KWallet)
+		// macOS: use Keychain
+		// Windows: use Windows Credential Manager
+	})
+	if err == nil {
+		item, err := ring.Get("credentials")
+		if err == nil {
+			return string(item.Data)
+		}
 	}
-	return strings.TrimSpace(string(out))
+
+	// Fallback for macOS: try security command directly
+	// (Claude Code stores credentials differently on macOS)
+	if runtime.GOOS == "darwin" {
+		cmd := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w")
+		out, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	return ""
 }
 
 func parseResetTime(resetsAt string) (time.Time, error) {
@@ -499,21 +523,71 @@ func getUsageColors(t Theme, percent int) (int, int) {
 	return t.UsageBad[0], t.UsageBad[1]
 }
 
+func getTerminalWidth() int {
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width <= 0 {
+		return 80 // default
+	}
+	return width
+}
+
+func visibleLength(s string) int {
+	// Count visible characters (rough estimate for emoji and CJK)
+	count := 0
+	for _, r := range s {
+		if r >= 0x1F300 && r <= 0x1FAFF { // Emoji range
+			count += 2
+		} else if r >= 0x3000 && r <= 0x9FFF { // CJK
+			count += 2
+		} else {
+			count++
+		}
+	}
+	return count
+}
+
+func segmentsWidth(segs []Segment) int {
+	width := 0
+	for _, seg := range segs {
+		width += visibleLength(seg.Text)
+	}
+	// Add separator widths
+	width += len(segs)
+	return width
+}
+
 func printStatusLine(model, version string, contextPercent int, branch, changes string, usage UsageLimits) {
 	t := getTheme()
+	termWidth := getTerminalWidth()
 
+	// Line 1: Model + Version + Branch
 	var line1Segs []Segment
 	line1Segs = append(line1Segs, Segment{Text: " " + model + " ", Fg: t.Model[0], Bg: t.Model[1]})
 	line1Segs = append(line1Segs, Segment{Text: " v" + version + " ", Fg: t.Version[0], Bg: t.Version[1]})
+
 	if branch != "" {
-		branchText := " ⎇ " + branch + " "
+		// Try with changes first
+		branchTextFull := " ⎇ " + branch + " "
 		if changes != "" {
-			branchText = " ⎇ " + branch + " " + changes + " "
+			branchTextFull = " ⎇ " + branch + " " + changes + " "
 		}
-		line1Segs = append(line1Segs, Segment{Text: branchText, Fg: t.Branch[0], Bg: t.Branch[1]})
+		branchSeg := Segment{Text: branchTextFull, Fg: t.Branch[0], Bg: t.Branch[1]}
+
+		if segmentsWidth(append(line1Segs, branchSeg)) <= termWidth {
+			line1Segs = append(line1Segs, branchSeg)
+		} else if changes != "" {
+			// Try without changes
+			branchTextShort := " ⎇ " + branch + " "
+			branchSeg = Segment{Text: branchTextShort, Fg: t.Branch[0], Bg: t.Branch[1]}
+			if segmentsWidth(append(line1Segs, branchSeg)) <= termWidth {
+				line1Segs = append(line1Segs, branchSeg)
+			}
+			// else: skip branch entirely
+		}
 	}
 	fmt.Println(renderPowerline(line1Segs))
 
+	// Line 2: Context + 5h usage
 	var line2Segs []Segment
 	ctxFg, ctxBg := getContextColors(t, contextPercent)
 	line2Segs = append(line2Segs, Segment{
@@ -521,33 +595,71 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 		Fg:   ctxFg,
 		Bg:   ctxBg,
 	})
+
 	if usage.FiveHour >= 0 {
-		text := fmt.Sprintf(" ⏱ 5h: %d%% ", usage.FiveHour)
+		// Try with reset time first
+		textFull := fmt.Sprintf(" ⏱ 5h: %d%% ", usage.FiveHour)
 		if usage.FiveHourReset != "" {
-			text = fmt.Sprintf(" ⏱ 5h: %d%% (%s) ", usage.FiveHour, usage.FiveHourReset)
+			textFull = fmt.Sprintf(" ⏱ 5h: %d%% (%s) ", usage.FiveHour, usage.FiveHourReset)
 		}
 		fg, bg := getUsageColors(t, usage.FiveHour)
-		line2Segs = append(line2Segs, Segment{Text: text, Fg: fg, Bg: bg})
+		fiveHourSeg := Segment{Text: textFull, Fg: fg, Bg: bg}
+
+		if segmentsWidth(append(line2Segs, fiveHourSeg)) <= termWidth {
+			line2Segs = append(line2Segs, fiveHourSeg)
+		} else {
+			// Try without reset time
+			textShort := fmt.Sprintf(" ⏱ 5h: %d%% ", usage.FiveHour)
+			fiveHourSeg = Segment{Text: textShort, Fg: fg, Bg: bg}
+			if segmentsWidth(append(line2Segs, fiveHourSeg)) <= termWidth {
+				line2Segs = append(line2Segs, fiveHourSeg)
+			}
+		}
 	}
 	fmt.Println(renderPowerline(line2Segs))
 
+	// Line 3: Weekly All + Sonnet
 	var line3Segs []Segment
+
 	if usage.Weekly >= 0 {
-		text := fmt.Sprintf(" 📅 All: %d%% ", usage.Weekly)
+		textFull := fmt.Sprintf(" 📅 All: %d%% ", usage.Weekly)
 		if usage.WeeklyReset != "" {
-			text = fmt.Sprintf(" 📅 All: %d%% (%s) ", usage.Weekly, usage.WeeklyReset)
+			textFull = fmt.Sprintf(" 📅 All: %d%% (%s) ", usage.Weekly, usage.WeeklyReset)
 		}
 		fg, bg := getUsageColors(t, usage.Weekly)
-		line3Segs = append(line3Segs, Segment{Text: text, Fg: fg, Bg: bg})
+		weeklySeg := Segment{Text: textFull, Fg: fg, Bg: bg}
+
+		if segmentsWidth(append(line3Segs, weeklySeg)) <= termWidth {
+			line3Segs = append(line3Segs, weeklySeg)
+		} else {
+			// Try without reset time
+			textShort := fmt.Sprintf(" 📅 All: %d%% ", usage.Weekly)
+			weeklySeg = Segment{Text: textShort, Fg: fg, Bg: bg}
+			line3Segs = append(line3Segs, weeklySeg)
+		}
 	}
+
 	if usage.Sonnet >= 0 {
-		text := fmt.Sprintf(" 💬 Sonnet: %d%% ", usage.Sonnet)
+		textFull := fmt.Sprintf(" 💬 Sonnet: %d%% ", usage.Sonnet)
 		if usage.SonnetReset != "" {
-			text = fmt.Sprintf(" 💬 Sonnet: %d%% (%s) ", usage.Sonnet, usage.SonnetReset)
+			textFull = fmt.Sprintf(" 💬 Sonnet: %d%% (%s) ", usage.Sonnet, usage.SonnetReset)
 		}
 		fg, bg := getUsageColors(t, usage.Sonnet)
-		line3Segs = append(line3Segs, Segment{Text: text, Fg: fg, Bg: bg})
+		sonnetSeg := Segment{Text: textFull, Fg: fg, Bg: bg}
+
+		if segmentsWidth(append(line3Segs, sonnetSeg)) <= termWidth {
+			line3Segs = append(line3Segs, sonnetSeg)
+		} else {
+			// Try without reset time
+			textShort := fmt.Sprintf(" 💬 Sonnet: %d%% ", usage.Sonnet)
+			sonnetSeg = Segment{Text: textShort, Fg: fg, Bg: bg}
+			if segmentsWidth(append(line3Segs, sonnetSeg)) <= termWidth {
+				line3Segs = append(line3Segs, sonnetSeg)
+			}
+			// else: skip sonnet entirely
+		}
 	}
+
 	if len(line3Segs) > 0 {
 		fmt.Println(renderPowerline(line3Segs))
 	}
