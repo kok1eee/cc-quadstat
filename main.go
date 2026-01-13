@@ -146,9 +146,10 @@ var themes = map[string]Theme{
 }
 
 func getTheme() Theme {
+	// Priority: env var > config file > default
 	name := os.Getenv("CC_THEME")
 	if name == "" {
-		name = "tokyo-night"
+		name = getThemeFromConfig()
 	}
 	if t, ok := themes[name]; ok {
 		return t
@@ -223,6 +224,11 @@ type KeychainCreds struct {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		handleCLI()
+		return
+	}
+
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		fmt.Println("❌ Error reading stdin")
@@ -248,6 +254,138 @@ func main() {
 	usage := getUsageLimits()
 
 	printStatusLine(modelName, hook.Version, contextPercent, branch, changes, usage)
+}
+
+func handleCLI() {
+	args := os.Args[1:]
+
+	switch args[0] {
+	case "--list-themes", "-l":
+		listThemes()
+	case "--set-theme", "-t":
+		if len(args) < 2 {
+			fmt.Println("Usage: cc-quadstat --set-theme <theme>")
+			os.Exit(1)
+		}
+		setTheme(args[1])
+	case "--init":
+		initConfig()
+	case "--help", "-h":
+		printHelp()
+	default:
+		fmt.Printf("Unknown option: %s\n", args[0])
+		printHelp()
+		os.Exit(1)
+	}
+}
+
+func getConfigDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "cc-quadstat")
+}
+
+func getThemeFile() string {
+	return filepath.Join(getConfigDir(), "theme")
+}
+
+func listThemes() {
+	currentTheme := getThemeFromConfig()
+	fmt.Println("Available themes:")
+	for name, theme := range themes {
+		marker := "  "
+		if name == currentTheme {
+			marker = "* "
+		}
+		fmt.Printf("%s%s - %s\n", marker, name, theme.Name)
+	}
+}
+
+func setTheme(name string) {
+	if _, ok := themes[name]; !ok {
+		fmt.Printf("Unknown theme: %s\n", name)
+		fmt.Println("Use --list-themes to see available themes")
+		os.Exit(1)
+	}
+
+	configDir := getConfigDir()
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		fmt.Printf("Failed to create config directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(getThemeFile(), []byte(name), 0644); err != nil {
+		fmt.Printf("Failed to save theme: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Theme set to: %s\n", name)
+}
+
+func getThemeFromConfig() string {
+	data, err := os.ReadFile(getThemeFile())
+	if err != nil {
+		return "tokyo-night"
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func initConfig() {
+	home, _ := os.UserHomeDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	// Check if cc-quadstat binary exists
+	binaryPath := filepath.Join(home, ".claude", "scripts", "cc-quadstat")
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		fmt.Printf("cc-quadstat binary not found at %s\n", binaryPath)
+		fmt.Println("Please copy the binary first:")
+		fmt.Printf("  mkdir -p ~/.claude/scripts && cp cc-quadstat %s\n", binaryPath)
+		os.Exit(1)
+	}
+
+	// Read existing settings
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		settings = make(map[string]interface{})
+	} else {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			fmt.Printf("Failed to parse settings.json: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Update statusLine
+	settings["statusLine"] = map[string]interface{}{
+		"type":    "command",
+		"command": binaryPath,
+	}
+
+	// Write back
+	output, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		fmt.Printf("Failed to serialize settings: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(settingsPath, output, 0644); err != nil {
+		fmt.Printf("Failed to write settings.json: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("✅ Claude Code settings updated")
+	fmt.Printf("   statusLine command: %s\n", binaryPath)
+	fmt.Println("\nRestart Claude Code to apply changes")
+}
+
+func printHelp() {
+	fmt.Println("cc-quadstat - Status line for Claude Code")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  cc-quadstat                    Run as statusLine (reads JSON from stdin)")
+	fmt.Println("  cc-quadstat --list-themes      List available themes")
+	fmt.Println("  cc-quadstat --set-theme <name> Set theme")
+	fmt.Println("  cc-quadstat --init             Initialize Claude Code settings")
+	fmt.Println("  cc-quadstat --help             Show this help")
 }
 
 func calculateContextPercent(hook HookInput) int {
@@ -560,6 +698,13 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 	t := getTheme()
 	termWidth := getTerminalWidth()
 
+	// Reserve space for Claude Code's right-side text
+	reservedWidth := 40
+	effectiveWidth := termWidth - reservedWidth
+	if effectiveWidth < 40 {
+		effectiveWidth = 40
+	}
+
 	// Line 1: Model + Version + Branch
 	var line1Segs []Segment
 	line1Segs = append(line1Segs, Segment{Text: " " + model + " ", Fg: t.Model[0], Bg: t.Model[1]})
@@ -573,13 +718,13 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 		}
 		branchSeg := Segment{Text: branchTextFull, Fg: t.Branch[0], Bg: t.Branch[1]}
 
-		if segmentsWidth(append(line1Segs, branchSeg)) <= termWidth {
+		if segmentsWidth(append(line1Segs, branchSeg)) <= effectiveWidth {
 			line1Segs = append(line1Segs, branchSeg)
 		} else if changes != "" {
 			// Try without changes
 			branchTextShort := " ⎇ " + branch + " "
 			branchSeg = Segment{Text: branchTextShort, Fg: t.Branch[0], Bg: t.Branch[1]}
-			if segmentsWidth(append(line1Segs, branchSeg)) <= termWidth {
+			if segmentsWidth(append(line1Segs, branchSeg)) <= effectiveWidth {
 				line1Segs = append(line1Segs, branchSeg)
 			}
 			// else: skip branch entirely
@@ -605,13 +750,13 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 		fg, bg := getUsageColors(t, usage.FiveHour)
 		fiveHourSeg := Segment{Text: textFull, Fg: fg, Bg: bg}
 
-		if segmentsWidth(append(line2Segs, fiveHourSeg)) <= termWidth {
+		if segmentsWidth(append(line2Segs, fiveHourSeg)) <= effectiveWidth {
 			line2Segs = append(line2Segs, fiveHourSeg)
 		} else {
 			// Try without reset time
 			textShort := fmt.Sprintf(" ⏱ 5h: %d%% ", usage.FiveHour)
 			fiveHourSeg = Segment{Text: textShort, Fg: fg, Bg: bg}
-			if segmentsWidth(append(line2Segs, fiveHourSeg)) <= termWidth {
+			if segmentsWidth(append(line2Segs, fiveHourSeg)) <= effectiveWidth {
 				line2Segs = append(line2Segs, fiveHourSeg)
 			}
 		}
@@ -629,7 +774,7 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 		fg, bg := getUsageColors(t, usage.Weekly)
 		weeklySeg := Segment{Text: textFull, Fg: fg, Bg: bg}
 
-		if segmentsWidth(append(line3Segs, weeklySeg)) <= termWidth {
+		if segmentsWidth(append(line3Segs, weeklySeg)) <= effectiveWidth {
 			line3Segs = append(line3Segs, weeklySeg)
 		} else {
 			// Try without reset time
@@ -647,13 +792,13 @@ func printStatusLine(model, version string, contextPercent int, branch, changes 
 		fg, bg := getUsageColors(t, usage.Sonnet)
 		sonnetSeg := Segment{Text: textFull, Fg: fg, Bg: bg}
 
-		if segmentsWidth(append(line3Segs, sonnetSeg)) <= termWidth {
+		if segmentsWidth(append(line3Segs, sonnetSeg)) <= effectiveWidth {
 			line3Segs = append(line3Segs, sonnetSeg)
 		} else {
 			// Try without reset time
 			textShort := fmt.Sprintf(" 💬 Sonnet: %d%% ", usage.Sonnet)
 			sonnetSeg = Segment{Text: textShort, Fg: fg, Bg: bg}
-			if segmentsWidth(append(line3Segs, sonnetSeg)) <= termWidth {
+			if segmentsWidth(append(line3Segs, sonnetSeg)) <= effectiveWidth {
 				line3Segs = append(line3Segs, sonnetSeg)
 			}
 			// else: skip sonnet entirely
