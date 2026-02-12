@@ -70,24 +70,13 @@ fn get_terminal_width() -> usize {
         .unwrap_or(80)
 }
 
-fn format_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{}M", n / 1_000_000)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        format!("{}", n)
-    }
-}
-
 pub fn print_status_line(
-    model: &str,
     version: &str,
+    cwd: &str,
     context_percent: i32,
     branch: &str,
     file_changes: &str,
-    total_tokens: i64,
-    context_window_size: i64,
+    line_changes: &str,
 ) {
     let t = get_theme();
     let term_width = get_terminal_width();
@@ -99,58 +88,63 @@ pub fn print_status_line(
         40
     };
 
-    // Line 1: Model + Version + Branch (file changes)
-    let mut line1 = vec![
-        Segment { text: format!(" {} ", model), fg: t.model[0], bg: t.model[1] },
+    // Line 1: Dir + Version
+    let dir_name = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cwd);
+
+    let line1 = vec![
+        Segment { text: format!(" \u{1F4C2} {} ", dir_name), fg: t.model[0], bg: t.model[1] },
         Segment { text: format!(" v{} ", version), fg: t.version[0], bg: t.version[1] },
     ];
 
-    if !branch.is_empty() {
-        let branch_text_full = if !file_changes.is_empty() {
-            format!(" \u{238B} {} {} ", branch, file_changes)
-        } else {
-            format!(" \u{238B} {} ", branch)
-        };
-        let branch_seg = Segment { text: branch_text_full.clone(), fg: t.branch[0], bg: t.branch[1] };
-
-        let mut test = line1.clone_refs();
-        test.push(&branch_seg);
-        if segments_width_refs(&test) <= effective_width {
-            line1.push(Segment { text: branch_text_full, fg: t.branch[0], bg: t.branch[1] });
-        } else if !file_changes.is_empty() {
-            let branch_text_short = format!(" \u{238B} {} ", branch);
-            let short_seg = Segment { text: branch_text_short.clone(), fg: t.branch[0], bg: t.branch[1] };
-            let mut test2 = line1.clone_refs();
-            test2.push(&short_seg);
-            if segments_width_refs(&test2) <= effective_width {
-                line1.push(Segment { text: branch_text_short, fg: t.branch[0], bg: t.branch[1] });
-            }
-        }
-    }
-
     println!("{}", render_powerline(&line1));
 
-    // Line 2: Context + Tokens
+    // Line 2: Branch + File changes + Line changes + Context
     let (ctx_fg, ctx_bg) = get_context_colors(&t, context_percent);
-    let mut line2 = vec![
-        Segment {
-            text: format!(" \u{1F9E0} {}% ", context_percent),
-            fg: ctx_fg,
-            bg: ctx_bg,
-        },
-    ];
 
-    if total_tokens > 0 && context_window_size > 0 {
-        let token_text = format!(" \u{1F4CA} {}/{} ", format_tokens(total_tokens), format_tokens(context_window_size));
-        let token_seg = Segment { text: token_text.clone(), fg: t.version[0], bg: t.version[1] };
-        let mut test = line2.clone_refs();
-        test.push(&token_seg);
-        if segments_width_refs(&test) <= effective_width {
-            line2.push(Segment { text: token_text, fg: t.version[0], bg: t.version[1] });
+    if !branch.is_empty() {
+        let mut info_parts = vec![branch.to_string()];
+        if !file_changes.is_empty() {
+            info_parts.push(file_changes.to_string());
         }
-    }
+        if !line_changes.is_empty() {
+            info_parts.push(format!("({})", line_changes));
+        }
 
-    println!("{}", render_powerline(&line2));
+        let branch_text = format!(" \u{238B} {} ", info_parts.join(" "));
+
+        let mut line2 = vec![
+            Segment { text: branch_text, fg: t.branch[0], bg: t.branch[1] },
+            Segment { text: format!(" \u{1F9E0} {}% ", context_percent), fg: ctx_fg, bg: ctx_bg },
+        ];
+
+        // 幅に収まらない場合、段階的に省略
+        if segments_width_refs(&line2.clone_refs()) > effective_width {
+            let mut short_parts = vec![branch.to_string()];
+            if !file_changes.is_empty() {
+                short_parts.push(file_changes.to_string());
+            }
+            line2 = vec![
+                Segment { text: format!(" \u{238B} {} ", short_parts.join(" ")), fg: t.branch[0], bg: t.branch[1] },
+                Segment { text: format!(" \u{1F9E0} {}% ", context_percent), fg: ctx_fg, bg: ctx_bg },
+            ];
+        }
+        if segments_width_refs(&line2.clone_refs()) > effective_width {
+            line2 = vec![
+                Segment { text: format!(" \u{238B} {} ", branch), fg: t.branch[0], bg: t.branch[1] },
+                Segment { text: format!(" \u{1F9E0} {}% ", context_percent), fg: ctx_fg, bg: ctx_bg },
+            ];
+        }
+
+        println!("{}", render_powerline(&line2));
+    } else {
+        let line2 = vec![
+            Segment { text: format!(" \u{1F9E0} {}% ", context_percent), fg: ctx_fg, bg: ctx_bg },
+        ];
+        println!("{}", render_powerline(&line2));
+    }
 }
 
 trait CloneRefs {

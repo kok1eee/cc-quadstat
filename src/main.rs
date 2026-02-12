@@ -31,29 +31,19 @@ fn main() {
         }
     };
 
-    let model_name = hook
-        .model
-        .display_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or(hook.model.id.as_deref().filter(|s| !s.is_empty()))
-        .unwrap_or("Unknown");
-
     let version = hook.version.as_deref().unwrap_or("?");
     let context_percent = calculate_context_percent(&hook);
-    let (total_tokens, context_window_size) = get_token_info(&hook);
 
     let cwd = hook.cwd.as_deref().unwrap_or(".");
-    let (branch, file_changes) = vcs::get_vcs_info(cwd);
+    let (branch, file_changes, line_changes) = vcs::get_vcs_info(cwd);
 
     render::print_status_line(
-        model_name,
         version,
+        cwd,
         context_percent,
         &branch,
         &file_changes,
-        total_tokens,
-        context_window_size,
+        &line_changes,
     );
 }
 
@@ -85,19 +75,6 @@ fn calculate_context_percent(hook: &HookInput) -> i32 {
         .unwrap_or(100);
 
     remaining.clamp(0, 100) as i32
-}
-
-/// Returns (total_tokens_used, context_window_size)
-fn get_token_info(hook: &HookInput) -> (i64, i64) {
-    let cw = match hook.context_window.as_ref() {
-        Some(cw) => cw,
-        None => return (0, 0),
-    };
-
-    let total_input = cw.total_input_tokens.unwrap_or(0);
-    let window_size = cw.context_window_size.unwrap_or(0);
-
-    (total_input, window_size)
 }
 
 fn home_dir() -> PathBuf {
