@@ -31,6 +31,9 @@ fn main() {
         }
     };
 
+    let model_name = hook.model.display_name.as_deref()
+        .or(hook.model.id.as_deref())
+        .unwrap_or("Claude");
     let version = hook.version.as_deref().unwrap_or("?");
     let context_percent = calculate_context_percent(&hook);
 
@@ -38,6 +41,7 @@ fn main() {
     let (branch, file_changes, line_changes) = vcs::get_vcs_info(cwd);
 
     render::print_status_line(
+        model_name,
         version,
         cwd,
         context_percent,

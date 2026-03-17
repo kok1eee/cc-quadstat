@@ -1,4 +1,4 @@
-use crate::types::{Segment, Theme};
+use crate::types::Segment;
 use crate::theme::get_theme;
 
 const RESET: &str = "\x1b[0m";
@@ -39,38 +39,8 @@ fn render_powerline(segments: &[Segment]) -> String {
     out
 }
 
-fn visible_length(s: &str) -> usize {
-    let mut count = 0;
-    for c in s.chars() {
-        let cp = c as u32;
-        if (0x1F300..=0x1FAFF).contains(&cp) {
-            count += 2;
-        } else if (0x3000..=0x9FFF).contains(&cp) {
-            count += 2;
-        } else {
-            count += 1;
-        }
-    }
-    count
-}
-
-fn get_context_colors(t: &Theme, percent: i32) -> (u8, u8) {
-    if percent > 50 {
-        (t.ctx_good[0], t.ctx_good[1])
-    } else if percent > 20 {
-        (t.ctx_warn[0], t.ctx_warn[1])
-    } else {
-        (t.ctx_bad[0], t.ctx_bad[1])
-    }
-}
-
-fn get_terminal_width() -> usize {
-    terminal_size::terminal_size()
-        .map(|(w, _)| w.0 as usize)
-        .unwrap_or(80)
-}
-
 pub fn print_status_line(
+    model_name: &str,
     version: &str,
     cwd: &str,
     context_percent: i32,
@@ -79,13 +49,13 @@ pub fn print_status_line(
     line_changes: &str,
 ) {
     let t = get_theme();
-    let term_width = get_terminal_width();
 
-    let reserved_width = 40;
-    let effective_width = if term_width > reserved_width + 40 {
-        term_width - reserved_width
+    let (ctx_fg, ctx_bg) = if context_percent > 50 {
+        (t.ctx_good[0], t.ctx_good[1])
+    } else if context_percent > 20 {
+        (t.ctx_warn[0], t.ctx_warn[1])
     } else {
-        40
+        (t.ctx_bad[0], t.ctx_bad[1])
     };
 
     let dir_name = std::path::Path::new(cwd)
@@ -93,12 +63,16 @@ pub fn print_status_line(
         .and_then(|n| n.to_str())
         .unwrap_or(cwd);
 
-    let (ctx_fg, ctx_bg) = get_context_colors(&t, context_percent);
-
-    // Dir + Version + Branch + Changes + Context (1行)
-    let mut segments = vec![
-        Segment { text: format!(" \u{1F4C2} {} ", dir_name), fg: t.model[0], bg: t.model[1] },
+    // Line 1: model, version, context
+    let line1 = vec![
+        Segment { text: format!(" {} ", model_name), fg: t.model[0], bg: t.model[1] },
         Segment { text: format!(" v{} ", version), fg: t.version[0], bg: t.version[1] },
+        Segment { text: format!(" \u{1F9E0} {}% ", context_percent), fg: ctx_fg, bg: ctx_bg },
+    ];
+
+    // Line 2: dir, branch, changes
+    let mut line2 = vec![
+        Segment { text: format!(" \u{1F4C2} {} ", dir_name), fg: t.version[0], bg: t.version[1] },
     ];
 
     if !branch.is_empty() {
@@ -109,73 +83,12 @@ pub fn print_status_line(
         if !line_changes.is_empty() {
             info_parts.push(format!("({})", line_changes));
         }
-
-        let branch_seg = Segment {
+        line2.push(Segment {
             text: format!(" \u{238B} {} ", info_parts.join(" ")),
             fg: t.branch[0], bg: t.branch[1],
-        };
-
-        let ctx_seg = Segment {
-            text: format!(" \u{1F9E0} {}% ", context_percent),
-            fg: ctx_fg, bg: ctx_bg,
-        };
-
-        // 全部入るか試す
-        let mut test = segments.clone_refs();
-        test.push(&branch_seg);
-        test.push(&ctx_seg);
-
-        if segments_width_refs(&test) <= effective_width {
-            segments.push(Segment { text: branch_seg.text, fg: t.branch[0], bg: t.branch[1] });
-        } else {
-            // line_changesを省略
-            let mut short_parts = vec![branch.to_string()];
-            if !file_changes.is_empty() {
-                short_parts.push(file_changes.to_string());
-            }
-            let short_seg = Segment {
-                text: format!(" \u{238B} {} ", short_parts.join(" ")),
-                fg: t.branch[0], bg: t.branch[1],
-            };
-            let mut test2 = segments.clone_refs();
-            test2.push(&short_seg);
-            test2.push(&ctx_seg);
-
-            if segments_width_refs(&test2) <= effective_width {
-                segments.push(Segment { text: short_seg.text, fg: t.branch[0], bg: t.branch[1] });
-            } else {
-                // file_changesも省略
-                segments.push(Segment {
-                    text: format!(" \u{238B} {} ", branch),
-                    fg: t.branch[0], bg: t.branch[1],
-                });
-            }
-        }
+        });
     }
 
-    segments.push(Segment {
-        text: format!(" \u{1F9E0} {}% ", context_percent),
-        fg: ctx_fg, bg: ctx_bg,
-    });
-
-    println!("{}", render_powerline(&segments));
-}
-
-trait CloneRefs {
-    fn clone_refs(&self) -> Vec<&Segment>;
-}
-
-impl CloneRefs for Vec<Segment> {
-    fn clone_refs(&self) -> Vec<&Segment> {
-        self.iter().collect()
-    }
-}
-
-fn segments_width_refs(segs: &[&Segment]) -> usize {
-    let mut width: usize = 0;
-    for seg in segs {
-        width += visible_length(&seg.text);
-    }
-    width += segs.len();
-    width
+    println!("{}", render_powerline(&line1));
+    println!("{}", render_powerline(&line2));
 }
