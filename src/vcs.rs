@@ -17,7 +17,7 @@ pub fn get_vcs_info(cwd: &str) -> (String, String, String) {
 
 fn get_jj_info(cwd: &str) -> (String, String, String) {
     let branch = Command::new("jj")
-        .args(["log", "-r", "@", "--no-graph", "-T",
+        .args(["log", "--ignore-working-copy", "-r", "@", "--no-graph", "-T",
                "if(bookmarks, bookmarks.join(\" \"), change_id.shortest())"])
         .current_dir(cwd)
         .output()
@@ -34,7 +34,7 @@ fn get_jj_info(cwd: &str) -> (String, String, String) {
         .unwrap_or_else(|| "@".to_string());
 
     let diff_output = Command::new("jj")
-        .args(["diff", "--summary"])
+        .args(["diff", "--ignore-working-copy", "--summary"])
         .current_dir(cwd)
         .output()
         .ok()
@@ -50,7 +50,7 @@ fn get_jj_info(cwd: &str) -> (String, String, String) {
     let file_changes = count_file_changes(&diff_output);
 
     let line_changes = Command::new("jj")
-        .args(["diff", "--stat"])
+        .args(["diff", "--ignore-working-copy", "--stat"])
         .current_dir(cwd)
         .output()
         .ok()
